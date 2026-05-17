@@ -309,7 +309,7 @@ class STSController:
             CommError: 書込失敗時。
         """
         self._packet.unLockEprom(sid)
-        comm, _ = self._packet.writeByte(sid, _ADDR_OPERATING_MODE, mode)
+        comm, _ = self._write_1byte_raw(sid, _ADDR_OPERATING_MODE, mode)
         self._packet.LockEprom(sid)
         if comm != COMM_SUCCESS:
             raise CommError(f"ID {sid}: モード書込失敗 (comm={comm})")
@@ -353,6 +353,15 @@ class STSController:
         """
         if sid not in self.ids:
             raise ValueError(f"ID {sid} は登録されていません（登録済み: {self.ids}）")
+
+    def _write_1byte_raw(self, sid: int, addr: int, value: int) -> tuple[int, int]:
+        """SDKのバージョン差分を吸収して1バイト値を書き込む。"""
+        write_fn = getattr(self._packet, "write1ByteTxRx", None)
+        if write_fn is None:
+            write_fn = getattr(self._packet, "writeByte", None)
+        if write_fn is None:
+            raise FeetechError("SDKに write1ByteTxRx / writeByte メソッドが見つかりません")
+        return write_fn(sid, addr, value)
 
     # ------------------------------------------------------------
     # 制御コマンド：モード0（角度指定）
@@ -587,7 +596,7 @@ class STSController:
         """
         self._require_connected()
         self._require_id(sid)
-        comm, _ = self._packet.writeByte(sid, _ADDR_TORQUE_ENABLE, 1)
+        comm, _ = self._write_1byte_raw(sid, _ADDR_TORQUE_ENABLE, 1)
         if comm != COMM_SUCCESS:
             raise CommError(f"ID {sid}: トルクON失敗 (comm={comm})")
 
@@ -604,7 +613,7 @@ class STSController:
         """
         self._require_connected()
         self._require_id(sid)
-        comm, _ = self._packet.writeByte(sid, _ADDR_TORQUE_ENABLE, 0)
+        comm, _ = self._write_1byte_raw(sid, _ADDR_TORQUE_ENABLE, 0)
         if comm != COMM_SUCCESS:
             raise CommError(f"ID {sid}: トルクOFF失敗 (comm={comm})")
 
