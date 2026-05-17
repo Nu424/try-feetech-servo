@@ -291,9 +291,8 @@ class STSController:
         Raises:
             CommError: 通信失敗時。
         """
-        val, comm, _ = self._packet.read1ByteTxRx(sid, _ADDR_OPERATING_MODE)
-        if comm != COMM_SUCCESS:
-            raise CommError(f"ID {sid}: モード読み取り失敗 (comm={comm})")
+        val, comm, err = self._packet.read1ByteTxRx(sid, _ADDR_OPERATING_MODE)
+        self._check_result(sid, "モード読み取り", comm, err)
         return val
 
     def _set_mode_raw(self, sid: int, mode: int) -> None:
@@ -308,11 +307,17 @@ class STSController:
         Raises:
             CommError: 書込失敗時。
         """
-        self._packet.unLockEprom(sid)
-        comm, _ = self._write_1byte_raw(sid, _ADDR_OPERATING_MODE, mode)
-        self._packet.LockEprom(sid)
-        if comm != COMM_SUCCESS:
-            raise CommError(f"ID {sid}: モード書込失敗 (comm={comm})")
+        comm, err = self._packet.unLockEprom(sid)
+        self._check_result(sid, "EEPROMロック解除", comm, err)
+        write_succeeded = False
+        try:
+            comm, err = self._write_1byte_raw(sid, _ADDR_OPERATING_MODE, mode)
+            self._check_result(sid, "モード書込", comm, err)
+            write_succeeded = True
+        finally:
+            lock_comm, lock_err = self._packet.LockEprom(sid)
+            if write_succeeded:
+                self._check_result(sid, "EEPROM再ロック", lock_comm, lock_err)
         # モード切替直後の挙動安定化のため軽くスリープ
         time.sleep(0.02)
 
@@ -362,6 +367,17 @@ class STSController:
         if write_fn is None:
             raise FeetechError("SDKに write1ByteTxRx / writeByte メソッドが見つかりません")
         return write_fn(sid, addr, value)
+
+    def _check_result(self, sid: int, action: str, comm: int, err: int = 0) -> None:
+        """通信結果とサーボ側エラーをまとめて検査する。"""
+        if comm != COMM_SUCCESS:
+            detail = self._packet.getTxRxResult(comm) if self._packet is not None else ""
+            suffix = f" {detail}" if detail else ""
+            raise CommError(f"ID {sid}: {action}失敗 (comm={comm}){suffix}")
+        if err:
+            detail = self._packet.getRxPacketError(err) if self._packet is not None else ""
+            suffix = f" {detail}" if detail else ""
+            raise CommError(f"ID {sid}: {action}サーボエラー (err={err}){suffix}")
 
     # ------------------------------------------------------------
     # 制御コマンド：モード0（角度指定）
@@ -415,9 +431,8 @@ class STSController:
         acc_raw = max(1, int(_clamp(acc_ratio, 0.0, 1.0) * self.max_acc))
 
         # --- 送信 ---
-        comm, _ = self._packet.WritePosEx(sid, position, speed_raw, acc_raw)
-        if comm != COMM_SUCCESS:
-            raise CommError(f"ID {sid}: WritePosEx 失敗 (comm={comm})")
+        comm, err = self._packet.WritePosEx(sid, position, speed_raw, acc_raw)
+        self._check_result(sid, "WritePosEx", comm, err)
 
     def move_to_angle_sync(
         self,
@@ -466,7 +481,6 @@ class STSController:
 
         # --- GroupSyncWrite を組み立てて送信 ---
         gsw = GroupSyncWrite(
-            self._port_handler,
             self._packet,
             _ADDR_GOAL_ACC,
             _SYNC_DATA_LEN,
@@ -488,7 +502,9 @@ class STSController:
                     raise CommError(f"ID {sid}: GroupSyncWrite.addParam 失敗")
             comm = gsw.txPacket()
             if comm != COMM_SUCCESS:
-                raise CommError(f"GroupSyncWrite.txPacket 失敗 (comm={comm})")
+                detail = self._packet.getTxRxResult(comm)
+                suffix = f" {detail}" if detail else ""
+                raise CommError(f"GroupSyncWrite.txPacket 失敗 (comm={comm}){suffix}")
         finally:
             # 送信成功・失敗いずれも内部バッファをクリア
             gsw.clearParam()
@@ -535,9 +551,8 @@ class STSController:
         )
         if write_fn is None:
             raise FeetechError("SDKに WriteSpec / WriteSpe メソッドが見つかりません")
-        comm, _ = write_fn(sid, speed_raw, acc_raw)
-        if comm != COMM_SUCCESS:
-            raise CommError(f"ID {sid}: 速度書込失敗 (comm={comm})")
+        comm, err = write_fn(sid, speed_raw, acc_raw)
+        self._check_result(sid, "速度書込", comm, err)
 
     # ------------------------------------------------------------
     # 制御コマンド：モード2（PWM 開ループ）
@@ -575,9 +590,8 @@ class STSController:
         word = _signed_to_register(signed_pwm, direction_bit=10)
 
         # --- 送信 ---
-        comm, _ = self._packet.write2ByteTxRx(sid, _ADDR_RUNNING_TIME, word)
-        if comm != COMM_SUCCESS:
-            raise CommError(f"ID {sid}: PWM書込失敗 (comm={comm})")
+        comm, err = self._packet.write2ByteTxRx(sid, _ADDR_RUNNING_TIME, word)
+        self._check_result(sid, "PWM書込", comm, err)
 
     # ------------------------------------------------------------
     # トルク ON / OFF
@@ -596,9 +610,8 @@ class STSController:
         """
         self._require_connected()
         self._require_id(sid)
-        comm, _ = self._write_1byte_raw(sid, _ADDR_TORQUE_ENABLE, 1)
-        if comm != COMM_SUCCESS:
-            raise CommError(f"ID {sid}: トルクON失敗 (comm={comm})")
+        comm, err = self._write_1byte_raw(sid, _ADDR_TORQUE_ENABLE, 1)
+        self._check_result(sid, "トルクON", comm, err)
 
     def disable_torque(self, sid: int) -> None:
         """指定サーボのトルクをオフにする（手で動かせる状態）。
@@ -613,9 +626,8 @@ class STSController:
         """
         self._require_connected()
         self._require_id(sid)
-        comm, _ = self._write_1byte_raw(sid, _ADDR_TORQUE_ENABLE, 0)
-        if comm != COMM_SUCCESS:
-            raise CommError(f"ID {sid}: トルクOFF失敗 (comm={comm})")
+        comm, err = self._write_1byte_raw(sid, _ADDR_TORQUE_ENABLE, 0)
+        self._check_result(sid, "トルクOFF", comm, err)
 
     # ------------------------------------------------------------
     # 状態取得
@@ -638,8 +650,8 @@ class STSController:
 
     def _ping_raw(self, sid: int) -> bool:
         """ping の内部実装（例外を投げずに bool で返す）。"""
-        _, comm, _ = self._packet.ping(sid)
-        return comm == COMM_SUCCESS
+        _, comm, err = self._packet.ping(sid)
+        return comm == COMM_SUCCESS and err == 0
 
     def get_position(self, sid: int) -> float:
         """現在位置を角度 [deg, 0〜360] で取得する。
@@ -660,9 +672,8 @@ class STSController:
         """
         self._require_connected()
         self._require_id(sid)
-        pos, comm, _ = self._packet.ReadPos(sid)
-        if comm != COMM_SUCCESS:
-            raise CommError(f"ID {sid}: 位置読取失敗 (comm={comm})")
+        pos, comm, err = self._packet.ReadPos(sid)
+        self._check_result(sid, "位置読取", comm, err)
         # 0〜steps_per_rev → 0〜360 へ変換。範囲外は wrap してから返す
         return (pos % (self.steps_per_rev + 1)) / self.steps_per_rev * 360.0
 
@@ -682,9 +693,8 @@ class STSController:
         """
         self._require_connected()
         self._require_id(sid)
-        spd, comm, _ = self._packet.ReadSpeed(sid)
-        if comm != COMM_SUCCESS:
-            raise CommError(f"ID {sid}: 速度読取失敗 (comm={comm})")
+        spd, comm, err = self._packet.ReadSpeed(sid)
+        self._check_result(sid, "速度読取", comm, err)
         return spd
 
     def get_load(self, sid: int) -> int:
@@ -705,10 +715,9 @@ class STSController:
         """
         self._require_connected()
         self._require_id(sid)
-        load, comm, _ = self._packet.ReadLoad(sid)
-        if comm != COMM_SUCCESS:
-            raise CommError(f"ID {sid}: 負荷読取失敗 (comm={comm})")
-        return load
+        raw, comm, err = self._packet.read2ByteTxRx(sid, _ADDR_PRESENT_LOAD)
+        self._check_result(sid, "負荷読取", comm, err)
+        return self._packet.scs_tohost(raw, 10)
 
     def get_temperature(self, sid: int) -> float:
         """サーボ内部温度を [℃] で取得する。
@@ -729,9 +738,8 @@ class STSController:
         """
         self._require_connected()
         self._require_id(sid)
-        raw, comm, _ = self._packet.read1ByteTxRx(sid, _ADDR_PRESENT_TEMPERATURE)
-        if comm != COMM_SUCCESS:
-            raise CommError(f"ID {sid}: 温度読取失敗 (comm={comm})")
+        raw, comm, err = self._packet.read1ByteTxRx(sid, _ADDR_PRESENT_TEMPERATURE)
+        self._check_result(sid, "温度読取", comm, err)
         return float(raw)
 
     def get_voltage(self, sid: int) -> float:
@@ -750,9 +758,8 @@ class STSController:
         """
         self._require_connected()
         self._require_id(sid)
-        raw, comm, _ = self._packet.read1ByteTxRx(sid, _ADDR_PRESENT_VOLTAGE)
-        if comm != COMM_SUCCESS:
-            raise CommError(f"ID {sid}: 電圧読取失敗 (comm={comm})")
+        raw, comm, err = self._packet.read1ByteTxRx(sid, _ADDR_PRESENT_VOLTAGE)
+        self._check_result(sid, "電圧読取", comm, err)
         # 生値はおよそ「電圧×10」（70 = 7.0V）の慣習
         return raw * 0.1
 
@@ -819,7 +826,8 @@ class STSController:
         deadline = time.monotonic() + timeout
         interval = 1.0 / poll_hz
         while time.monotonic() < deadline:
-            moving, comm, _ = self._packet.read1ByteTxRx(sid, _ADDR_MOVING)
+            moving, comm, err = self._packet.ReadMoving(sid)
+            self._check_result(sid, "Moving読取", comm, err)
             if comm == COMM_SUCCESS and moving == 0:
                 return True
             time.sleep(interval)
@@ -872,7 +880,8 @@ class STSController:
         interval = 1.0 / poll_hz
         while time.monotonic() < deadline and remaining:
             for sid in list(remaining):
-                moving, comm, _ = self._packet.read1ByteTxRx(sid, _ADDR_MOVING)
+                moving, comm, err = self._packet.ReadMoving(sid)
+                self._check_result(sid, "Moving読取", comm, err)
                 if comm == COMM_SUCCESS and moving == 0:
                     remaining.discard(sid)
             if remaining:
